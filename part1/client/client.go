@@ -4,7 +4,7 @@ import (
 	"flag"
 	"net"
 	"fmt"
-	"strconv"
+	//"strconv"
 	"github.com/mdaigle/Peerster/part1/protocol"
 )
 
@@ -23,7 +23,7 @@ func main() {
 	}
 
 	// send the message from the next port
-	my_addr, err := net.ResolveUDPAddr("udp4", ":" + strconv.Itoa(client_addr.Port + 1))
+	my_addr, err := net.ResolveUDPAddr("udp4", "")
 
 	message := protocol.SimpleMessage{SenderName:"N/A", RelayPeer:"N/A", Body:msg_text}
 	bytes,_ := protocol.Encode(&message)

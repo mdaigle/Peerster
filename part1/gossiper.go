@@ -42,11 +42,15 @@ func main() {
 	}
 
 	for _,addr := range strings.Split(peers_string, ",") {
+		if addr == "" {
+			continue
+		}
 		peer_addr, err := net.ResolveUDPAddr("udp4", addr)
 		if err != nil {
 			fmt.Println("error resolving peer address " + addr)
 		}
 		peers_map[peer_addr.String()] = true
+		peers = append(peers, addr)
 	}
 
 	client_conn, err := net.ListenUDP("udp4", client_addr)
@@ -73,7 +77,7 @@ func readClient(conn *net.UDPConn) {
 
 		// Forward the message
 		message_bytes, _ := protocol.Encode(&message)
-		for addr := range peers_map {
+		for _,addr := range peers {
 			udp_addr, _ := net.ResolveUDPAddr("udp4", addr)
 			conn.WriteToUDP(message_bytes, udp_addr)
 		}
@@ -106,7 +110,7 @@ func readGossip(conn *net.UDPConn) {
 
 	// Forward the message
 	message_bytes, _ := protocol.Encode(&message)
-	for addr := range peers_map {
+	for _,addr := range peers {
 		if addr == relay_peer.String() {
 			continue
 		}
@@ -137,5 +141,5 @@ func printout(message protocol.SimpleMessage, client bool) {
 		fmt.Println(message.Body, message.SenderName, message.RelayPeer)
 	}
 
-	println(strings.Join(peers, ","))
+	fmt.Println(strings.Join(peers, ","))
 }
