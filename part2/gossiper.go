@@ -17,6 +17,7 @@ var local_id uint32
 
 // Set of known peers
 var peers_map map[string]bool
+var peers_map_lock sync.Mutex
 var peers []string
 
 var status_vector map[string][]*protocol.GossipPacket
@@ -29,6 +30,7 @@ func init() {
 	peers_map = make(map[string]bool)
 	status_vector = make(map[string][]*protocol.GossipPacket)
 	local_id = 0
+	rand.Seed(time.Now().Unix())
 }
 
 //./gossiper -UIPort=10000 -gossipPort=127.0.0.1:5000 -name=nodeA -peers_map=127.0.0.1:5001_10.1.1.7:5002
@@ -88,12 +90,13 @@ func readClient() {
 			continue
 		}
 
-		printoutMessageReceived(nil, message, true)
 
 		// Update the message fields
 		message.Rumor.Origin = name
 		local_id++
 		message.Rumor.ID = local_id
+
+		printoutMessageReceived(nil, message, true)
 
 		status_vector_lock.Lock()
 		_,ok := status_vector[message.Rumor.Origin]
@@ -115,7 +118,7 @@ func readClient() {
 		new_peer_addr_str := remaining_addrs[0]
 		new_peer_addr, _ := net.ResolveUDPAddr("udp4", new_peer_addr_str)
 		remaining_addrs = remaining_addrs[1:]
-		go startGossiping(nil, new_peer_addr, message)
+		go startGossiping(new_peer_addr, message)
 	}
 }
 
@@ -160,11 +163,13 @@ func processMessage(peer_addr *net.UDPAddr, buf *[]byte) {
 	}
 
 	// Add to peers if new peer
+	peers_map_lock.Lock()
 	_, ok := peers_map[peer_addr.String()]
 	if !ok {
 		peers_map[peer_addr.String()] = true
 		peers = append(peers, peer_addr.String())
 	}
+	peers_map_lock.Unlock()
 
 	printoutMessageReceived(peer_addr, message, false)
 
@@ -190,7 +195,7 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 		status_vector[message.Rumor.Origin] = append(status_vector[message.Rumor.Origin], message)
 
 		// Create a permutation of known peers
-		remaining_addrs := make([]string, len(peers))
+		/*remaining_addrs := make([]string, len(peers))
 		copy(remaining_addrs, peers)
 		// Remove the immediate peer addr
 		for i := range remaining_addrs {
@@ -202,19 +207,26 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 		for i := range remaining_addrs {
 			j := rand.Intn(i + 1)
 			remaining_addrs[i], remaining_addrs[j] = remaining_addrs[j], remaining_addrs[i]
-		}
+		}*/
 
-		if len(remaining_addrs) > 0 {
-			new_peer_addr_str := remaining_addrs[0]
+		if len(peers) > 1 {
+			new_peer_addr_str := peers[int(rand.Float32() * float32(len(peers)))]
+			for {
+				if new_peer_addr_str == peer_addr.String() {
+					new_peer_addr_str = peers[int(rand.Float32() * float32(len(peers)))]
+					continue
+				}
+				break
+			}
 			new_peer_addr, _ := net.ResolveUDPAddr("udp4", new_peer_addr_str)
-			remaining_addrs = remaining_addrs[1:]
 
 			// Start gossiping with a random peer
-			go startGossiping(remaining_addrs, new_peer_addr, message)
+			go startGossiping(new_peer_addr, message)
 		}
 	}
 	status_vector_lock.Unlock()
 	// Send a status as an ACK
+	fmt.Println("sending status after rumor")
 	sendStatus(peer_addr)
 }
 
@@ -256,7 +268,7 @@ func sendStatus(addr *net.UDPAddr) {
 	gossip_conn.WriteToUDP(message_bytes, addr)
 }
 
-func startGossiping(remaining_addrs []string, peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
+func startGossiping(peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
 	printoutMongering(peer_addr)
 
 	// Send the message
@@ -264,16 +276,22 @@ func startGossiping(remaining_addrs []string, peer_addr *net.UDPAddr, message *p
 	gossip_conn.WriteToUDP(message_bytes, peer_addr)
 
 	// Flip a coin and check if there are new peers to gossip with
-	if rand.Float32() >= 0.5 && len(remaining_addrs) > 0{
+	if rand.Float32() >= 0.5 && len(peers) > 1{
 		// Pick a new peer to gossip with
-		new_peer_addr_str := remaining_addrs[0]
+		new_peer_addr_str := peers[int(rand.Float32() * float32(len(peers)))]
+		for {
+			if new_peer_addr_str == peer_addr.String() {
+				new_peer_addr_str = peers[int(rand.Float32() * float32(len(peers)))]
+				continue
+			}
+			break
+		}
 		new_peer_addr, _ := net.ResolveUDPAddr("udp4", new_peer_addr_str)
-		remaining_addrs = remaining_addrs[1:]
 
 		printoutFlipPassed(new_peer_addr)
 
 		// Start gossiping with the new peer
-		go startGossiping(remaining_addrs, new_peer_addr, message)
+		go startGossiping(new_peer_addr, message)
 	}
 }
 

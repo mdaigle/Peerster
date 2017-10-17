@@ -27,7 +27,6 @@ func main() {
 	peer_message := protocol.PeerMessage{ID:0,Text:msg_text}
 	message := protocol.GossipPacket{Rumor: &protocol.RumorMessage{Origin:"283765", PeerMessage: &peer_message}}
 	bytes,_ := protocol.Encode(&message)
-	print(len(bytes))
 
 	//decoded,_ := protocol.Decode(bytes)
 	//print(decoded.Body, decoded.RelayPeer, decoded.SenderName)
