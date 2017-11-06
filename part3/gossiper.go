@@ -23,12 +23,14 @@ var local_id uint32
 
 // Set of known peers
 var peers_map map[string]bool
+var peers_map_lock sync.Mutex
 var peers []string
 
 var status_vector map[string][]*protocol.GossipPacket
 var status_vector_lock sync.Mutex
 
 var new_messages []*protocol.GossipPacket
+var new_peers_index int
 
 var client_conn *net.UDPConn
 var gossip_conn *net.UDPConn
@@ -39,6 +41,7 @@ func init() {
 	local_id = 0
 	rand.Seed(time.Now().Unix())
 	new_messages = make([]*protocol.GossipPacket, 0)
+	new_peers_index = 0
 }
 
 //./gossiper -UIPort=10000 -gossipPort=127.0.0.1:5000 -name=nodeA -peers_map=127.0.0.1:5001_10.1.1.7:5002
@@ -131,7 +134,12 @@ func newNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveNodes(w http.ResponseWriter, r * http.Request) {
-	return
+	if new_peers_index < len(peers) {
+		new_peers := peers[new_peers_index:]
+		new_peers_index = len(peers)
+		json_body, _ :=json.Marshal(new_peers)
+		w.Write(json_body)
+	}
 }
 
 type ClientMessage struct {
@@ -142,7 +150,7 @@ func sendMessage(w http.ResponseWriter, r *http.Request) {
 	r.ParseForm()
 	text := r.PostForm.Get("text")
 
-	message := &protocol.GossipPacket{Rumor: &protocol.RumorMessage{Origin:"client", PeerMessage: &protocol.PeerMessage{ID: 0, Text:text}}}
+	message := &protocol.GossipPacket{Rumor: &protocol.RumorMessage{Origin:"client", PeerMessage: protocol.PeerMessage{ID: 0, Text:text}}}
 	go sendClientMessage(message)
 
 	w.WriteHeader(http.StatusOK)
@@ -175,7 +183,7 @@ func sendClientMessage(message *protocol.GossipPacket) {
 	// Update the message fields
 	message.Rumor.Origin = name
 	local_id++
-	message.Rumor.ID = local_id
+	message.Rumor.PeerMessage.ID = local_id
 
 	printoutMessageReceived(nil, message, true)
 
@@ -248,11 +256,13 @@ func processMessage(peer_addr *net.UDPAddr, buf *[]byte) {
 	}
 
 	// Add to peers if new peer
+	peers_map_lock.Lock()
 	_, ok := peers_map[peer_addr.String()]
 	if !ok {
 		peers_map[peer_addr.String()] = true
 		peers = append(peers, peer_addr.String())
 	}
+	peers_map_lock.Unlock()
 
 	printoutMessageReceived(peer_addr, message, false)
 
@@ -273,7 +283,7 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 		messages = status_vector[message.Rumor.Origin]
 	}
 
-	if message.Rumor.ID == uint32(len(messages)) {
+	if message.Rumor.PeerMessage.ID == uint32(len(messages)) {
 		// refactor this if overhead causes timeouts due to slower ACK
 		status_vector[message.Rumor.Origin] = append(status_vector[message.Rumor.Origin], message)
 		new_messages = append(new_messages, message)
@@ -301,12 +311,14 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 func processStatus(peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
 	// Compare the status vectors
 	for _,peer_status := range message.Status.Want {
+		status_vector_lock.Lock()
 		messages, ok := status_vector[peer_status.Identifier]
 		if !ok {
 			// Add origin to status vector if new
 			status_vector[peer_status.Identifier] = make([]*protocol.GossipPacket, 1)
 			messages = status_vector[peer_status.Identifier]
 		}
+		status_vector_lock.Unlock()
 
 		if uint32(len(messages)) > peer_status.NextID {
 			// We're ahead, so get the peer up-to-date
@@ -325,11 +337,13 @@ func processStatus(peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
 }
 
 func sendStatus(addr *net.UDPAddr) {
-	peer_statuses := make([]*protocol.PeerStatus, 0)
+	peer_statuses := make([]protocol.PeerStatus, 0)
+	status_vector_lock.Lock()
 	for id,messages := range status_vector {
 		next_id := uint32(len(messages))
-		peer_statuses = append(peer_statuses, &protocol.PeerStatus{Identifier:id, NextID:next_id})
+		peer_statuses = append(peer_statuses, protocol.PeerStatus{Identifier:id, NextID:next_id})
 	}
+	status_vector_lock.Unlock()
 	message := &protocol.GossipPacket{Status: &protocol.StatusPacket{Want:peer_statuses}}
 
 	message_bytes, _ := protocol.Encode(message)
@@ -378,10 +392,10 @@ func readFromUDPConn(conn *net.UDPConn) (*net.UDPAddr, *[]byte, error) {
 // Assumes the message is well-formed
 func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPacket, client bool) {
 	if client {
-		fmt.Println("CLIENT", message.Rumor.Text, message.Rumor.Origin)
+		fmt.Println("CLIENT", message.Rumor.PeerMessage.Text, message.Rumor.Origin)
 	} else {
 		if message.Rumor != nil {
-			fmt.Println("RUMOR origin", message.Rumor.Origin, "from", peer_addr.String(), "ID", message.Rumor.ID, "contents", message.Rumor.Text)
+			fmt.Println("RUMOR origin", message.Rumor.Origin, "from", peer_addr.String(), "ID", message.Rumor.PeerMessage.ID, "contents", message.Rumor.PeerMessage.Text)
 		} else {
 			fmt.Print("STATUS from ", peer_addr.String())
 			for _,peer_status := range message.Status.Want {

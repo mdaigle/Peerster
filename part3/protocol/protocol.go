@@ -9,7 +9,7 @@ type GossipPacket struct {
 
 type RumorMessage struct {
 	Origin string
-	*PeerMessage
+	PeerMessage PeerMessage
 }
 
 type PeerMessage struct {
@@ -18,7 +18,7 @@ type PeerMessage struct {
 }
 
 type StatusPacket struct {
-	Want []*PeerStatus
+	Want []PeerStatus
 }
 
 type PeerStatus struct {

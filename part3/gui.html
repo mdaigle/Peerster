@@ -16,8 +16,9 @@
 
             });
             $("#send-message-button").click(function(){
-                message_text = $("#send-message-input").val()
-                $.post("http://localhost:8080/message", {"text":message_text})
+                message_text = $("#send-message-input").val();
+                $.post("http://localhost:8080/message", {"text":message_text});
+                $("#chat-box").prepend("<p>" + message_text + "</p>");
             });
             $("#new-node-button").click(function () {
 
@@ -26,8 +27,16 @@
                 $.getJSON("http://localhost:8080/message", function (data) {
                     if (data.length != 0) {
                         for (i = 0; i < data.length; i++) {
-                            message = data[i]["Rumor"]
-                            $("#chat-box").prepend("<p>" + message["Origin"] + ": " + message["Text"] + "</p>")
+                            message = data[i]["Rumor"];
+                            $("#chat-box").prepend("<p>" + message["Origin"] + ": " + message["PeerMessage"]["Text"] + "</p>")
+                        }
+                    }
+                })
+                $.getJSON("http://localhost:8080/node", function (data) {
+                    if (data.length != 0) {
+                        for (i = 0; i < data.length; i++) {
+                            peer = data[i];
+                            $("#node-box").prepend("<p>" + peer + "</p>")
                         }
                     }
                 })
@@ -45,7 +54,11 @@
     <br>
     <input type="text" title="New Node Here:" id="new-node-input">
     <button id="new-node-button">New Node</button>
-    <div id="chat-box"></div>
-    <div id="node-box"></div>
+    <div id="chat-box">
+        <p>init</p>
+    </div>
+    <div id="node-box">
+        <p>init</p>
+    </div>
 </body>
 </html>
