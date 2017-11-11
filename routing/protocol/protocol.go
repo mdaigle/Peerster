@@ -5,11 +5,19 @@ import "github.com/dedis/protobuf"
 type GossipPacket struct {
 	Rumor *RumorMessage
 	Status *StatusPacket
+	Private *PrivateMessage
 }
 
 type RumorMessage struct {
 	Origin string
-	PeerMessage PeerMessage
+	PeerMessage
+}
+
+type PrivateMessage struct {
+	Origin string
+	PeerMessage
+	Dest string
+	HopLimit uint32
 }
 
 type PeerMessage struct {
