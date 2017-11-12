@@ -74,12 +74,12 @@ func main() {
 	var err error
 
 	flag.StringVar(&ui_port, "UIPort", DEFAULT_UI_PORT, "an int")
-	flag.StringVar(&gossip_port, "gossipPort", "", "an address with port")
+	flag.StringVar(&gossip_port, "gossipAddr", "", "an address with port")
 	flag.StringVar(&name, "name", "", "a string")
 	flag.StringVar(&peers_string, "peers", "", "a comma separated list of addresses with ports")
 	flag.Int64Var(&rtimer, "rtimer", DEFAULT_RTIMER, "Time between route rumor messages")
 	flag.BoolVar(&no_forward, "noforward", DEFAULT_NO_FORWARD, "a boolean")
-	flag.StringVar(&web_port, "webPort", DEFAULT_WEB_PORT, "an int")
+	flag.StringVar(&web_port, "webPort", "", "an int")
 	flag.Parse()
 
 	client_addr, err = net.ResolveUDPAddr("udp4", ":"+ui_port)
@@ -105,12 +105,19 @@ func main() {
 	}
 
 	client_conn, err = net.ListenUDP("udp4", client_addr)
+	if err != nil {log.Fatal(err)}
+	//if client_conn == nil {log.Fatal("nil client conn")}
 	gossip_conn, err = net.ListenUDP("udp4", gossip_addr)
+	if err != nil {log.Fatal(err)}
+	//if gossip_conn == nil {log.Fatal("nil gossip conn")}
+
 
 	go readClient()
 	go readGossip()
-	go periodicEvents()
-	webServer()
+	if web_port != "" {
+		go webServer()
+	}
+	periodicEvents()
 }
 
 func webServer() {
@@ -241,9 +248,20 @@ func readClient() {
 			fmt.Println("Error decoding", err)
 			continue
 		}
-		sendClientMessage(message)
+		if message.Rumor != nil {
+			sendClientMessage(message)
+		} else {
+			sendClientPrivateMessage(message)
+		}
+
 		global_messages = append(global_messages, message)
 	}
+}
+
+func sendClientPrivateMessage(message *protocol.GossipPacket) {
+	dest := message.Private.Dest
+	text := message.Private.Text
+	go sendPrivate(dest, text)
 }
 
 func sendClientMessage(message *protocol.GossipPacket) {
@@ -304,9 +322,14 @@ func periodicEvents() {
 	// We want to send a route rumor upon startup, then based on timer
 	if len(peers) > 0 {
 		peer_addr_str := peers[int(rand.Float32()*float32(len(peers)))]
-		peer_addr, _ := net.ResolveUDPAddr("udp4", peer_addr_str)
-		// send a status message
-		sendRouteRumor(peer_addr)
+		peer_addr, err := net.ResolveUDPAddr("udp4", peer_addr_str)
+		if err == nil {
+			//log.Fatal(name, ": sending initial route rumor to ", peer_addr.String())
+			// send a status message
+			sendRouteRumor(peer_addr)
+		} else {
+			log.Fatal(name, ": Not sending initial route rumor")
+		}
 	}
 
 	for {
@@ -395,21 +418,38 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 
 	// Update the next hop routing table
 	next_hop[message.Rumor.Origin] = peer_addr.String()
+	printoutDSDV(message.Rumor.Origin, peer_addr.String())
+	//log.Fatal("DSDV ", name, " ", message.Rumor.Origin, " ", peer_addr.String())
 
 	// Drop if no_forward and a non-empty text
 	if no_forward && message.Rumor.Text!="" { return }
 
 	// Pick a random peer (other than sender) and start gossiping with them
-	if len(peers) <= 1 { return }
-
-	new_peer_addr_str := peers[int(rand.Float32()*float32(len(peers)))]
-	for {
-		if new_peer_addr_str != peer_addr.String() { break }
-		new_peer_addr_str = peers[int(rand.Float32()*float32(len(peers)))]
+	if len(peers) <= 1 {
+		return
 	}
-	new_peer_addr, _ := net.ResolveUDPAddr("udp4", new_peer_addr_str)
 
-	go startGossiping(new_peer_addr, message)
+	// Send to all peers immediately if it's a route rumor
+	if message.Rumor.Text == "" {
+		for _,peer_addr_str := range peers {
+			new_peer_addr, _ := net.ResolveUDPAddr("udp4", peer_addr_str)
+			// Send the message
+			message_bytes, _ := protocol.Encode(message)
+			gossip_conn.WriteToUDP(message_bytes, new_peer_addr)
+		}
+	} else {
+
+		new_peer_addr_str := peers[int(rand.Float32()*float32(len(peers)))]
+		for {
+			if new_peer_addr_str != peer_addr.String() {
+				break
+			}
+			new_peer_addr_str = peers[int(rand.Float32()*float32(len(peers)))]
+		}
+		new_peer_addr, _ := net.ResolveUDPAddr("udp4", new_peer_addr_str)
+
+		go startGossiping(new_peer_addr, message)
+	}
 }
 
 func processStatus(peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
@@ -523,6 +563,8 @@ func sendRouteRumor(addr *net.UDPAddr) {
 	status_vector[message.Rumor.Origin] = append(status_vector[message.Rumor.Origin], message)
 
 	message_bytes, _ := protocol.Encode(message)
+	//log.Fatal(message_bytes)
+	//log.Fatal(addr)
 	gossip_conn.WriteToUDP(message_bytes, addr)
 }
 
@@ -618,11 +660,15 @@ func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPac
 			}
 			fmt.Println()
 		} else {
-			fmt.Println("PRIVATE origin", message.Private.Origin, "contents", message.Private.Text)
+			fmt.Printf("PRIVATE: %s:%d:%s\n", message.Private.Origin, message.Private.HopLimit-1, message.Private.Text)
 		}
 	}
 
 	fmt.Println(strings.Join(peers, ","))
+}
+
+func printoutDSDV(origin string, addr string) {
+	fmt.Printf("DSDV %s: %s\n", origin, addr)
 }
 
 func printoutMongering(peer_addr *net.UDPAddr) {

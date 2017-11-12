@@ -74,7 +74,7 @@ func main() {
 	var err error
 
 	flag.StringVar(&ui_port, "UIPort", DEFAULT_UI_PORT, "an int")
-	flag.StringVar(&gossip_port, "gossipPort", "", "an address with port")
+	flag.StringVar(&gossip_port, "gossipAddr", "", "an address with port")
 	flag.StringVar(&name, "name", "", "a string")
 	flag.StringVar(&peers_string, "peers", "", "a comma separated list of addresses with ports")
 	flag.Int64Var(&rtimer, "rtimer", DEFAULT_RTIMER, "Time between route rumor messages")
