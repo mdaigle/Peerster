@@ -111,7 +111,6 @@ func main() {
 	if err != nil {log.Fatal(err)}
 	//if gossip_conn == nil {log.Fatal("nil gossip conn")}
 
-
 	go readClient()
 	go readGossip()
 	if web_port != "" {
@@ -419,7 +418,6 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 	// Update the next hop routing table
 	next_hop[message.Rumor.Origin] = peer_addr.String()
 	printoutDSDV(message.Rumor.Origin, peer_addr.String())
-	//log.Fatal("DSDV ", name, " ", message.Rumor.Origin, " ", peer_addr.String())
 
 	// Drop if no_forward and a non-empty text
 	if no_forward && message.Rumor.Text!="" { return }
@@ -438,7 +436,6 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 			gossip_conn.WriteToUDP(message_bytes, new_peer_addr)
 		}
 	} else {
-
 		new_peer_addr_str := peers[int(rand.Float32()*float32(len(peers)))]
 		for {
 			if new_peer_addr_str != peer_addr.String() {
@@ -563,8 +560,6 @@ func sendRouteRumor(addr *net.UDPAddr) {
 	status_vector[message.Rumor.Origin] = append(status_vector[message.Rumor.Origin], message)
 
 	message_bytes, _ := protocol.Encode(message)
-	//log.Fatal(message_bytes)
-	//log.Fatal(addr)
 	gossip_conn.WriteToUDP(message_bytes, addr)
 }
 
