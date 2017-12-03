@@ -11,13 +11,13 @@
     <link href="metisMenu.min.css" rel="stylesheet">
     <script>
         $(document).ready(function(){
-            var debug = true
+            var debug = true;
 
             $.getJSON("http://" + location.hostname+":"+location.port + "/id", function (data) {
                 $("#id-box").text(data)
             });
 
-            var private_peer = ""
+            var private_peer = "";
 
             var stringToColour = function(str) {
                 var hash = 0;
@@ -70,7 +70,8 @@
 
             // Handle request to change id
             $("#change-id-button").click(function(){
-                var new_id = $("#change-id-input").text()
+                var new_id = $("#change-id-input").val()
+                $.post("http://" + location.hostname+":"+location.port + "/id/" + new_id);
             });
 
             // Handle sending message to global chat
@@ -101,6 +102,10 @@
 
             // Periodically, retrieve state from server
             setInterval(function(){
+                $.getJSON("http://" + location.hostname+":"+location.port + "/id", function (data) {
+                    $("#id-box").text(data)
+                });
+
                 var num_msgs = $("#global-chat").children().length
                 $.getJSON("http://" + location.hostname+":"+location.port + "/message/" + num_msgs, function (data) {
                     if (data != null && data.length != 0) {

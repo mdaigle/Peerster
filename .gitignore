@@ -1,2 +1,7 @@
+*.log
 *.out
 .DS_Store
+filesearch/hw3/*
+filesharing/hw3/*
+filesearch/site/*
+filesharing/site/*

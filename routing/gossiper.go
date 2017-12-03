@@ -121,7 +121,7 @@ func main() {
 
 func webServer() {
 	r := mux.NewRouter()
-	r.HandleFunc("/id", changeId).Methods("POST")
+	r.HandleFunc("/id/{id}", changeId).Methods("POST")
 	r.HandleFunc("/id", serveId).Methods("GET")
 	r.HandleFunc("/node", newNode).Methods("POST")
 	r.HandleFunc("/node", serveNodes).Methods("GET")
@@ -141,11 +141,12 @@ func webServer() {
 }
 
 func changeId(w http.ResponseWriter, r *http.Request) {
-	return
-	/*vars := mux.Vars(r)
+	vars := mux.Vars(r)
+	status_vector_lock.Lock()
 	name = vars["id"]
 	local_id = 0
-	w.WriteHeader(http.StatusOK)*/
+	status_vector_lock.Unlock()
+	w.WriteHeader(http.StatusOK)
 }
 
 func serveId(w http.ResponseWriter, r *http.Request) {
