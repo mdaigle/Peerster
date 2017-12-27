@@ -618,13 +618,13 @@ func processMessage(peer_addr *net.UDPAddr, buf *[]byte) {
 	}
 
 	// Add to peers if new peer
-	peers_map_lock.Lock()
+	/*peers_map_lock.Lock()
 	_, ok := peers_map[peer_addr.String()]
 	if !ok {
 		peers_map[peer_addr.String()] = true
 		peers = append(peers, peer_addr.String())
 	}
-	peers_map_lock.Unlock()
+	peers_map_lock.Unlock()*/
 
 	printoutMessageReceived(peer_addr, message, false)
 
@@ -644,7 +644,7 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 	status_vector_lock.Lock()
 	defer status_vector_lock.Unlock()
 
-	peers_map_lock.Lock()
+	/*peers_map_lock.Lock()
 	// Add to last ip and port if new
 	if message.Rumor.LastIP != nil && message.Rumor.LastPort != nil {
 		last_addr := message.Rumor.LastIP.String() + ":" + strconv.Itoa(*message.Rumor.LastPort)
@@ -654,7 +654,7 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 			peers = append(peers, last_addr)
 		}
 	}
-	peers_map_lock.Unlock()
+	peers_map_lock.Unlock()*/
 
 	// Add origin to status vector if new
 	messages,ok := status_vector[message.Rumor.Origin]
@@ -1042,7 +1042,7 @@ func readFromUDPConn(conn *net.UDPConn) (*net.UDPAddr, *[]byte, error) {
 
 // Assumes the message is well-formed
 func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPacket, client bool) {
-	if true {return}
+	//if true {return}
 
 	if client {
 		fmt.Println("CLIENT", message.Rumor.PeerMessage.Text, message.Rumor.Origin)
@@ -1064,32 +1064,32 @@ func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPac
 }
 
 func printoutDSDV(origin string, addr string) {
-	if true {return}
+	//if true {return}
 	fmt.Printf("DSDV %s: %s\n", origin, addr)
 }
 
 func printoutDirectRoute(origin string, addr string) {
-	if true {return}
+	//if true {return}
 	fmt.Printf("DIRECT-ROUTE FOR %s: %s\n", origin, addr)
 }
 
 func printoutMongeringRoute(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("MONGERING ROUTE to", peer_addr.String())
 }
 
 func printoutMongeringText(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("MONGERING TEXT to", peer_addr.String())
 }
 
 func printoutFlipPassed(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("FLIPPED COIN sending rumor to", peer_addr.String())
 }
 
 func printoutInSync(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("IN SYNC WITH", peer_addr.String())
 }
 

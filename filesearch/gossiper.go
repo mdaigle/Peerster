@@ -69,11 +69,12 @@ var local_files_lock sync.Mutex
 var local_chunks_lock sync.Mutex
 
 // Stores search results by file
-var remote_files map[string][]*protocol.SearchResult
+var remote_files map[string][]*RemoteChunks
 var remote_file_lock sync.Mutex
 
 // Stores a list of matches for the most recent search
-var matches map[string]string
+var matches_map map[string]string
+var match_order []string
 var matches_lock sync.Mutex
 
 var global_budget uint64 = DEFAULT_START_BUDGET
@@ -98,6 +99,12 @@ type FileMetadata struct {
 	MetaHash []byte
 }
 
+type RemoteChunks struct {
+	Origin string
+	ChunkMap []uint64
+	MetafileHash []byte
+}
+
 func init() {
 	peers_map = make(map[string]bool)
 	next_hop = make(map[string]Hop)
@@ -108,8 +115,9 @@ func init() {
 	private_messages = make(map[string][]*protocol.GossipPacket)
 	local_files = make(map[string]string)
 	local_chunks = make(map[string][]byte)
-	remote_files = make(map[string][]*protocol.SearchResult)
-	matches = make(map[string]string)
+	remote_files = make(map[string][]*RemoteChunks)
+	matches_map = make(map[string]string)
+	match_order = make([]string, 0)
 	request_cache = cache.New(500*time.Millisecond, 10*time.Minute)
 }
 
@@ -201,12 +209,18 @@ func fileSearch(w http.ResponseWriter, r *http.Request) {
 	keywords := strings.Split(keyword_string, ",")
 
 	budget := DEFAULT_START_BUDGET
+
+	searchForFile(keywords, budget)
+}
+
+func searchForFile(keywords []string, budget uint64) {
 	global_budget = budget
 	num_matches := 0
 	// reset remote files
-	remote_files = make(map[string][]*protocol.SearchResult)
+	remote_files = make(map[string][]*RemoteChunks)
 	// reset matches
-	matches = make(map[string]string)
+	matches_map = make(map[string]string)
+	match_order = make([]string, 0)
 
 	fmt.Println("Initiating search with budget", budget)
 	go initiateFileSearch(keywords, budget)
@@ -220,7 +234,9 @@ func fileSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		remote_file_lock.Lock()
 		for file_name, results := range remote_files {
-			//fmt.Println("Remote files not empty")
+
+			if len(results) == 0 { continue }
+
 			hex_hash := hex.EncodeToString(results[0].MetafileHash)
 			local_chunks_lock.Lock()
 			metadata, ok := local_chunks[hex_hash]
@@ -243,9 +259,13 @@ func fileSearch(w http.ResponseWriter, r *http.Request) {
 			}
 
 			matches_lock.Lock()
-			matches[file_name] = hex_hash
+			_,ok = matches_map[file_name]
+			if !ok {
+				num_matches++
+				matches_map[file_name] = hex_hash
+				match_order = append(match_order, file_name + ":" + hex_hash)
+			}
 			matches_lock.Unlock()
-			num_matches++
 		}
 		remote_file_lock.Unlock()
 
@@ -266,7 +286,7 @@ func fileSearch(w http.ResponseWriter, r *http.Request) {
 
 func servefileSearchResults(w http.ResponseWriter, r *http.Request) {
 	matches_lock.Lock()
-	matches_json,_ := json.Marshal(matches)
+	matches_json,_ := json.Marshal(match_order)
 	matches_lock.Unlock()
 
 	w.Write(matches_json)
@@ -283,7 +303,12 @@ func fileDownload(w http.ResponseWriter, r *http.Request) {
 	dest := r.PostForm.Get("dest")
 	file_name := r.PostForm.Get("file_name")
 	hex_hash := r.PostForm.Get("hex_hash")
-	downloadFile(dest, file_name, hex_hash)
+	if dest != "" {
+		downloadFile(dest, file_name, hex_hash)
+	} else {
+		fmt.Println("Downloading a remote file")
+		downloadRemoteFile(file_name, hex_hash)
+	}
 }
 
 func fileListLocal(w http.ResponseWriter, r *http.Request) {
@@ -406,12 +431,13 @@ func scanInFile(file_name string) {
 	}
 	defer metafile.Close()
 
-	local_chunks_lock.Lock()
 	var chunks [][]byte = chunkFile(file)
 	hashes := make([][]byte,0)
 	for _,chunk := range chunks {
 		hash := hashBytes(chunk)
+		local_chunks_lock.Lock()
 		local_chunks[hex.EncodeToString(hash)] = chunk
+		local_chunks_lock.Unlock()
 		hashes = append(hashes, hash)
 	}
 
@@ -420,6 +446,7 @@ func scanInFile(file_name string) {
 	metafile.WriteAt(metafile_contents, 0)
 
 	metahash := hashBytes(metafile_contents)
+	local_chunks_lock.Lock()
 	local_chunks[hex.EncodeToString(metahash)] = metafile_contents
 	local_chunks_lock.Unlock()
 
@@ -496,6 +523,7 @@ func continueFileSearch(last_peer *net.UDPAddr, origin string, keywords []string
 		}
 	} else {
 		split_budget := splitBudget(budget)
+		if split_budget == nil { return }
 		for i:=0; i < len(split_budget); i++ {
 			peer_addr_str := peers[int(rand.Float32()*float32(len(peers)))]
 			peer_addr, _ := net.ResolveUDPAddr("udp4", peer_addr_str)
@@ -512,6 +540,7 @@ func continueFileSearch(last_peer *net.UDPAddr, origin string, keywords []string
 
 func splitBudget(budget uint64) []uint64 {
 	split_len := len(peers)
+	if split_len == 0 { return nil}
 	budget_per_peer := make([]uint64, split_len)
 	for i := range budget_per_peer {
 		budget_per_peer[i] = 0
@@ -525,6 +554,112 @@ func splitBudget(budget uint64) []uint64 {
 	}
 
 	return budget_per_peer
+}
+
+func downloadRemoteFile(file_name string, hex_hash string) {
+	remote_file_lock.Lock()
+	results,ok := remote_files[file_name]
+	remote_file_lock.Unlock()
+	// If no matches in remote files, we don't know where to get the chunks
+	if !ok { return }
+
+	// We should already have the metafile if the file is in remote_files
+	local_chunks_lock.Lock()
+	metadata := local_chunks[hex_hash]
+	local_chunks_lock.Unlock()
+
+	// Get chunks from each peer
+	for _,result := range results {
+		go downloadChunks(result.Origin, file_name, result.ChunkMap, metadata)
+	}
+
+	// Check if we have all the chunks
+	check_timer := time.NewTicker(1*time.Second)
+	for {
+		select {
+		case <-check_timer.C:
+			i := 0
+			for i < len(metadata)/32 {
+				chunk_hash := metadata[32*i:32*i+32]
+				local_chunks_lock.Lock()
+				_,ok = local_chunks[hex.EncodeToString(chunk_hash)]
+				local_chunks_lock.Unlock()
+				if !ok {
+					break
+				}
+				if i == len(metadata)/32 - 1 {
+					printoutReconstructed(file_name)
+					writeDownloadToDisk(file_name, metadata)
+					return
+				}
+			}
+		}
+	}
+}
+
+func downloadChunks(dest string, file_name string, chunks []uint64, metadata []byte) {
+	chunk_hashes := make([][]byte,0)
+	if chunks == nil {
+		i := 0
+		for i < len(metadata)/32 {
+			chunk_hashes = append(chunk_hashes, metadata[32*i:32*i+32])
+			i++
+		}
+	} else {
+		for i := 0; i < len(chunks); i++ {
+			chunk_id := int(chunks[i])
+			chunk_hash := metadata[32 * (chunk_id - 1): 32 * (chunk_id - 1) + 32]
+			chunk_hashes = append(chunk_hashes, chunk_hash)
+		}
+	}
+
+	var resend *time.Ticker = time.NewTicker(time.Duration(RESEND_TIMEOUT) * time.Second)
+
+	// Get chunks sequentially
+	// Retry every 5 seconds if no response
+	current_chunk := chunk_hashes[0]
+	current_chunk_index := 0
+	local_chunks_lock.Lock()
+	_,ok := local_chunks[hex.EncodeToString([]byte(current_chunk))]
+	local_chunks_lock.Unlock()
+	if !ok {
+		printoutDownloadingChunk(file_name, 1, dest)
+		sendDataRequest(dest, file_name, hex.EncodeToString([]byte(current_chunk)))
+		resend = time.NewTicker(time.Duration(RESEND_TIMEOUT) * time.Second)
+	}
+
+	for {
+		local_chunks_lock.Lock()
+		_,ok := local_chunks[hex.EncodeToString([]byte(current_chunk))]
+		local_chunks_lock.Unlock()
+		if ok {
+			if current_chunk_index == len(chunk_hashes) - 1 {
+				return
+			}
+
+			for index,chunk_hash := range chunk_hashes {
+				local_chunks_lock.Lock()
+				_,ok := local_chunks[hex.EncodeToString([]byte(chunk_hash))]
+				local_chunks_lock.Unlock()
+				if !ok {
+					printoutDownloadingChunk(file_name, index + 1, dest)
+					current_chunk = []byte(chunk_hash)
+					current_chunk_index = index
+					// Send request for next chunk and reset ticker
+					sendDataRequest(dest, file_name, hex.EncodeToString([]byte(current_chunk)))
+					resend = time.NewTicker(time.Duration(RESEND_TIMEOUT) * time.Second)
+					break
+				}
+			}
+
+		}
+
+		select {
+		case <-resend.C:
+			sendDataRequest(dest, file_name, hex.EncodeToString([]byte(current_chunk)))
+		default:
+		}
+	}
 }
 
 func downloadFile(dest string, file_name string, hex_hash string) {
@@ -543,6 +678,21 @@ func downloadFile(dest string, file_name string, hex_hash string) {
 		local_chunks[hex_hash] = metadata
 	}
 
+
+	downloadChunks(dest, file_name, nil, metadata)
+
+	printoutReconstructed(file_name)
+
+	writeDownloadToDisk(file_name, metadata)
+}
+
+func writeDownloadToDisk(file_name string, metadata []byte) {
+	file, err := os.Create(DEFAULT_FILE_PATH + file_name) // For read access.
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	chunk_hashes := make([][]byte,0)
 	i := 0
 	for i < len(metadata)/32 {
@@ -550,73 +700,12 @@ func downloadFile(dest string, file_name string, hex_hash string) {
 		i++
 	}
 
-	var resend *time.Ticker = time.NewTicker(time.Duration(RESEND_TIMEOUT) * time.Second)
-
-	// Get chunks sequentially
-	// Retry every 5 seconds if no response
-	current_chunk := chunk_hashes[0]
-	current_chunk_index := 0
-	done := false
 	local_chunks_lock.Lock()
-	_,ok = local_chunks[hex.EncodeToString([]byte(current_chunk))]
-	if !ok {
-		printoutDownloadingChunk(file_name, 0, dest)
-		sendDataRequest(dest, file_name, hex.EncodeToString([]byte(current_chunk)))
-		resend = time.NewTicker(time.Duration(RESEND_TIMEOUT) * time.Second)
-	}
-	local_chunks_lock.Unlock()
-	for !done {
-		local_chunks_lock.Lock()
-		_,ok := local_chunks[hex.EncodeToString([]byte(current_chunk))]
-		if ok {
-			//fmt.Println("Received the chunk, picking next")
-
-			if current_chunk_index == len(chunk_hashes) - 1 {
-				//fmt.Println("Got the last chunk")
-				done = true
-				break
-			}
-
-			for index,chunk_hash := range chunk_hashes {
-				//fmt.Println("Deciding on chunk", index)
-				_,ok := local_chunks[hex.EncodeToString([]byte(chunk_hash))]
-				if !ok {
-					printoutDownloadingChunk(file_name, index, dest)
-					current_chunk = []byte(chunk_hash)
-					current_chunk_index = index
-					// Send request for next chunk and reset ticker
-					sendDataRequest(dest, file_name, hex.EncodeToString([]byte(current_chunk)))
-					resend = time.NewTicker(time.Duration(RESEND_TIMEOUT) * time.Second)
-					break
-				}
-			}
-
-		} else {
-			//fmt.Println("Haven't received chunk")
-		}
-		local_chunks_lock.Unlock()
-
-		select {
-			case <-resend.C:
-				//fmt.Println("Sending request for", hex.EncodeToString([]byte(current_chunk)))
-				sendDataRequest(dest, file_name, hex.EncodeToString([]byte(current_chunk)))
-			default:
-		}
-	}
-
-	printoutReconstructed(file_name)
-
-	file, err := os.Create(DEFAULT_FILE_PATH + file_name) // For read access.
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
 	for index,chunk_hash := range chunk_hashes {
 		data,_ := local_chunks[hex.EncodeToString([]byte(chunk_hash))]
-		//fmt.Println("Writing", data)
 		file.WriteAt(data, int64(index * 8000))
 	}
-	//file.WriteAt([]byte{0,0,0,0,1,1,1,1}, int64(32 * len(chunk_hashes)))
+	local_chunks_lock.Unlock()
 	file.Close()
 }
 
@@ -639,7 +728,6 @@ func downloadMetafile(dest string, file_name string, hex_hash string) []byte{
 
 		select {
 		case <-resend.C:
-			//fmt.Println("Sending request for", hex_hash)
 			sendDataRequest(dest, file_name, hex_hash)
 		default:
 		}
@@ -669,6 +757,8 @@ func readClient() {
 			downloadFile(message.DataRequest.Destination,
 						 message.DataRequest.FileName,
 						 hex.EncodeToString(message.DataRequest.HashValue))
+		} else if message.SearchRequest != nil {
+			searchForFile(message.SearchRequest.Keywords, message.SearchRequest.Budget)
 		}
 	}
 }
@@ -793,13 +883,13 @@ func processMessage(peer_addr *net.UDPAddr, buf *[]byte) {
 	}
 
 	// Add to peers if new peer
-	peers_map_lock.Lock()
+	/*peers_map_lock.Lock()
 	_, ok := peers_map[peer_addr.String()]
 	if !ok {
 		peers_map[peer_addr.String()] = true
 		peers = append(peers, peer_addr.String())
 	}
-	peers_map_lock.Unlock()
+	peers_map_lock.Unlock()*/
 
 	printoutMessageReceived(peer_addr, message, false)
 
@@ -821,7 +911,7 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 	status_vector_lock.Lock()
 	defer status_vector_lock.Unlock()
 
-	peers_map_lock.Lock()
+	/*peers_map_lock.Lock()
 	// Add to last ip and port if new
 	if message.Rumor.LastIP != nil && message.Rumor.LastPort != nil {
 		last_addr := message.Rumor.LastIP.String() + ":" + strconv.Itoa(*message.Rumor.LastPort)
@@ -831,7 +921,7 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 			peers = append(peers, last_addr)
 		}
 	}
-	peers_map_lock.Unlock()
+	peers_map_lock.Unlock()*/
 
 	// Add origin to status vector if new
 	messages,ok := status_vector[message.Rumor.Origin]
@@ -985,9 +1075,10 @@ func processSearchRequest(peer_addr *net.UDPAddr, message *protocol.GossipPacket
 
 	// Check if we have chunks for any matching files we find
 	results := make([]*protocol.SearchResult, 0)
-	local_chunks_lock.Lock()
 	for file_name, hex_meta_hash := range matches {
+		local_chunks_lock.Lock()
 		chunk_ids := listLocalChunks(file_name, hex_meta_hash)
+		local_chunks_lock.Unlock()
 		if chunk_ids != nil && len(chunk_ids) > 0 {
 			metafile_hash,_ := hex.DecodeString(hex_meta_hash)
 			result := &protocol.SearchResult{
@@ -998,7 +1089,6 @@ func processSearchRequest(peer_addr *net.UDPAddr, message *protocol.GossipPacket
 			results = append(results, result)
 		}
 	}
-	local_chunks_lock.Unlock()
 
 	// Send a SearchReply back to the original querent
 	sendSearchReply(message.SearchRequest.Origin, results)
@@ -1101,12 +1191,15 @@ func processSearchReply(message *protocol.GossipPacket) {
 	for _,result := range message.SearchReply.Results {
 		remote_file_lock.Lock()
 		existing_results, ok := remote_files[result.FileName]
+		remote_file_lock.Unlock()
 
 		// If this is a "new" file, instantiate result store
 		if !ok {
 			printoutFoundMatch(result, message.SearchReply)
-			remote_files[result.FileName] = make([]*protocol.SearchResult,0)
+			remote_file_lock.Lock()
+			remote_files[result.FileName] = make([]*RemoteChunks,0)
 			existing_results = remote_files[result.FileName]
+			remote_file_lock.Unlock()
 
 			// If this is a truly new file, download its metafile
 			local_chunks_lock.Lock()
@@ -1120,7 +1213,9 @@ func processSearchReply(message *protocol.GossipPacket) {
 			}
 		}
 
-		existing_results = append(existing_results, result)
+		rc := &RemoteChunks{Origin:message.SearchReply.Origin, ChunkMap:result.ChunkMap, MetafileHash:result.MetafileHash}
+		existing_results = append(existing_results, rc)
+		remote_file_lock.Lock()
 		remote_files[result.FileName] = existing_results
 		remote_file_lock.Unlock()
 
@@ -1241,7 +1336,6 @@ func sendDataReply(request *protocol.DataRequest, data []byte) {
 			Data:        data,
 		},
 	}
-	//fmt.Println("sending data", data)
 	sendP2P(reply, request.Origin)
 }
 
@@ -1314,7 +1408,7 @@ func readFromUDPConn(conn *net.UDPConn) (*net.UDPAddr, *[]byte, error) {
 
 // Assumes the message is well-formed
 func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPacket, client bool) {
-	if true {return}
+	//if true {return}
 
 	if client {
 		fmt.Println("CLIENT", message.Rumor.PeerMessage.Text, message.Rumor.Origin)
@@ -1327,41 +1421,41 @@ func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPac
 				fmt.Print(" origin ", peer_status.Identifier, " nextID ", peer_status.NextID)
 			}
 			fmt.Println()
-		} else {
+		} else if message.Private != nil{
 			fmt.Printf("PRIVATE: %s:%d:%s\n", message.Private.Origin, message.Private.HopLimit-1, message.Private.Text)
 		}
+		fmt.Println(strings.Join(peers, ","))
 	}
 
-	fmt.Println(strings.Join(peers, ","))
 }
 
 func printoutDSDV(origin string, addr string) {
-	if true {return}
+	//if true {return}
 	fmt.Printf("DSDV %s: %s\n", origin, addr)
 }
 
 func printoutDirectRoute(origin string, addr string) {
-	if true {return}
+	//if true {return}
 	fmt.Printf("DIRECT-ROUTE FOR %s: %s\n", origin, addr)
 }
 
 func printoutMongeringRoute(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("MONGERING ROUTE to", peer_addr.String())
 }
 
 func printoutMongeringText(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("MONGERING TEXT to", peer_addr.String())
 }
 
 func printoutFlipPassed(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("FLIPPED COIN sending rumor to", peer_addr.String())
 }
 
 func printoutInSync(peer_addr *net.UDPAddr) {
-	if true {return}
+	//if true {return}
 	fmt.Println("IN SYNC WITH", peer_addr.String())
 }
 

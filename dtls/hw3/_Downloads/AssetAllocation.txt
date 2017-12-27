@@ -1,0 +1,13 @@
+20 % bonds
+64 % domestic stock
+16 % international stock
+
+1000 - 150 = 850
+170 in bonds
+544 in domestic stocks
+136 in international stocks
+
+2000 - 150 = 1850
+
+VTI
+BND

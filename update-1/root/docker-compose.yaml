@@ -1,0 +1,85 @@
+version: '2'
+
+services:
+  nodepub:
+    image: dedis/cs438_hw2_node
+    container_name: nodepub
+    hostname: nodepub
+    volumes:
+    - ./nodepub:/root
+    networks:
+      netpub:
+        ipv4_address: 172.16.0.2
+    command: /bin/rewrite_gateway.sh none
+
+  nata:
+    image: dedis/cs438_hw2_nat
+    container_name: nata
+    hostname: nata
+    networks:
+      neta:
+        ipv4_address: 172.16.1.2
+      netpub:
+        ipv4_address: 172.16.0.3
+    cap_add:
+      - ALL
+    command: /root/enable_nat.sh 172.16.0.3 172.16.1.3
+
+  natb:
+    image: dedis/cs438_hw2_nat
+    container_name: natb
+    hostname: natb
+    networks:
+      netb:
+        ipv4_address: 172.16.2.2
+      netpub:
+        ipv4_address: 172.16.0.4
+    cap_add:
+      - ALL
+    command: /root/enable_nat.sh 172.16.0.4 172.16.2.3
+
+  nodea:
+    image: dedis/cs438_hw2_node
+    container_name: nodea
+    hostname: nodea
+    volumes:
+    - ./nodea:/root
+    networks:
+      neta:
+        ipv4_address: 172.16.1.3
+    extra_hosts:
+      - nodepub:172.16.0.2
+    cap_add:
+      - ALL
+    command: /bin/rewrite_gateway.sh 1
+
+  nodeb:
+    image: dedis/cs438_hw2_node
+    container_name: nodeb
+    hostname: nodeb
+    volumes:
+    - ./nodeb:/root
+    networks:
+      netb:
+        ipv4_address: 172.16.2.3
+    extra_hosts:
+      - nodepub:172.16.0.2
+    cap_add:
+      - ALL
+    command: /bin/rewrite_gateway.sh 2
+
+networks:
+  netpub:
+    ipam:
+      config:
+        - subnet: 172.16.0.0/24
+  neta:
+    ipam:
+      config:
+        - subnet: 172.16.1.0/24
+    internal: true
+  netb:
+    ipam:
+      config:
+        - subnet: 172.16.2.0/24
+    internal: true

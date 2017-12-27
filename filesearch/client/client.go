@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/mdaigle/Peerster/filesearch/protocol"
 	"encoding/hex"
+	"strings"
 )
 
 // ./client   -UIPort=10001   -msg=Hello
@@ -15,12 +16,16 @@ func main() {
 	var dest string
 	var file string
 	var request string
+	var keyword_str string
+	var budget uint64
 
 	flag.StringVar(&ui_port, "UIPort", "10001", "an int")
 	flag.StringVar(&msg_text, "msg", "", "a string")
 	flag.StringVar(&dest, "Dest", "", "a string")
 	flag.StringVar(&file, "file", "", "a filename")
 	flag.StringVar(&request, "request", "", "file's metahash")
+	flag.StringVar(&keyword_str, "keywords", "", "a list of keywords")
+	flag.Uint64Var(&budget, "budget", 2, "uint64 search budget")
 	flag.Parse()
 
 	client_addr, err := net.ResolveUDPAddr("udp4", ":"+ui_port)
@@ -55,6 +60,14 @@ func main() {
 				Destination: dest,
 				HashValue: hash,
 				FileName: file,
+			},
+		}
+	} else if keyword_str != "" {
+		message = protocol.GossipPacket{
+			SearchRequest: &protocol.SearchRequest{
+				Origin: "client",
+				Budget: budget,
+				Keywords: strings.Split(keyword_str, ","),
 			},
 		}
 	}
