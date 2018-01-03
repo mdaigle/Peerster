@@ -5,12 +5,14 @@ import (
 	"net"
 	"crypto/cipher"
 	"crypto/rsa"
+	"encoding/json"
 )
 
 type SecurePacket struct {
-	MessageType int
+	DataLength uint32
+	MessageType uint32
+	PublicKey rsa.PublicKey
 	Data []byte
-	PublicKey *rsa.PublicKey
 }
 
 const (
@@ -104,7 +106,7 @@ func EncryptPacket(packet *GossipPacket, cipher_block cipher.Block) []byte {
 }
 
 func EncodeSecure(message *SecurePacket) ([]byte, error) {
-	return protobuf.Encode(message)
+	return json.Marshal(message)
 }
 
 func EncodeGossip(packet *GossipPacket) ([]byte, error) {
@@ -113,7 +115,7 @@ func EncodeGossip(packet *GossipPacket) ([]byte, error) {
 
 func DecodeSecure(buf []byte) (*SecurePacket, error) {
 	message := &SecurePacket{}
-	err := protobuf.Decode(buf, message)
+	err := json.Unmarshal(buf, message)
 	return message, err
 }
 

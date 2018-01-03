@@ -25,6 +25,8 @@ import (
 	"math/rand"
 	"crypto/cipher"
 	"crypto/aes"
+	"errors"
+	"github.com/libp2p/go-reuseport"
 )
 
 // Defaults
@@ -39,7 +41,7 @@ const SEARCH_RESEND_TIMEOUT = 1
 const DEFAULT_START_BUDGET uint64 = 2
 const MAX_BUDGET uint64 = 32
 const MATCH_THRESHOLD uint8 = 2
-var HALF_KEY_LABEL,_ = json.Marshal("half_key")
+var HALF_KEY_LABEL = []byte("half_key")
 const HALF_KEY_BYTE_LENGTH = 16
 
 // Local node info
@@ -93,17 +95,17 @@ var client_conn *net.UDPConn
 var gossip_conn *net.UDPConn
 
 // TCP connection for setup
-var setup_listener *net.TCPListener
-var setup_listener_conn *net.TCPConn
-var setup_listener_addr *net.TCPAddr
-var setup_sender_conn *net.TCPConn
-var setup_sender_addr *net.TCPAddr
+var setup_listener net.Listener
+var setup_listener_conn net.Conn
+var setup_listener_addr net.Addr
+var setup_sender_conn net.Conn
+var setup_sender_addr net.Addr
 
 // RSA Keypair
 var rsa_kp *rsa.PrivateKey
 
 // Symmetric keys for each peer
-var ciphers map[string]*cipher.Block
+var ciphers map[string]cipher.Block
 var ciphers_lock sync.Mutex
 
 type Hop struct {
@@ -139,7 +141,15 @@ func init() {
 	matches_map = make(map[string]string)
 	match_order = make([]string, 0)
 	request_cache = cache.New(500*time.Millisecond, 10*time.Minute)
-	rsa_kp, _ = rsa.GenerateKey(crypto_rand.Reader, 2048)
+	ciphers = make(map[string]cipher.Block)
+
+	var err error
+	fmt.Println("Generating rsa key")
+	rsa_kp, err = rsa.GenerateKey(crypto_rand.Reader, 4096)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
 
 //./gossiper -UIPort=10000 -gossipPort=127.0.0.1:5000 -name=nodeA -peers_map=127.0.0.1:5001_10.1.1.7:5002
@@ -186,11 +196,13 @@ func main() {
 	//if gossip_conn == nil {log.Fatal("nil gossip conn")}
 
 	sa := fmt.Sprintf("%s:%d", gossip_addr.IP, gossip_addr.Port + 1)
-	setup_listener_addr,_ := net.ResolveTCPAddr("tcp", sa)
-	setup_listener, _ = net.ListenTCP("tcp", setup_listener_addr)
+	setup_listener_addr,_ = reuseport.ResolveAddr("tcp", sa)
+	setup_listener, _ = reuseport.Listen("tcp", setup_listener_addr.String())
 
 	sa = fmt.Sprintf("%s:%d", gossip_addr.IP, gossip_addr.Port + 2)
-	setup_sender_addr,_ = net.ResolveTCPAddr("tcp", sa)
+	setup_sender_addr,_ = reuseport.ResolveAddr("tcp", sa)
+
+	fmt.Println("Sender addr", setup_sender_addr.String())
 
 	go readClient()
 	go readGossip()
@@ -202,11 +214,13 @@ func main() {
 }
 
 func addPeer(addr string) *net.TCPAddr{
-	peer_addr, err := net.ResolveTCPAddr("udp4", addr)
+	peer_addr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		fmt.Println("error resolving peer address " + addr)
 		return nil
 	}
+
+	fmt.Println("Adding peer", peer_addr.String())
 
 	peers_map_lock.Lock()
 	_, ok := peers_map[addr]
@@ -223,18 +237,21 @@ func addPeer(addr string) *net.TCPAddr{
 func setupPeer(addr string) error {
 	peer_addr := addPeer(addr)
 
+	fmt.Println("About to handshake")
 	key, err := handshake(peer_addr)
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
 
 	cipher_block, err := aes.NewCipher(key)
 	if err != nil {
+		fmt.Println(err)
 		return err
 	}
 
 	ciphers_lock.Lock()
-	ciphers[peer_addr.String()] = &cipher_block
+	ciphers[peer_addr.String()] = cipher_block
 	ciphers_lock.Unlock()
 
 	return nil
@@ -243,7 +260,8 @@ func setupPeer(addr string) error {
 func listenSetup() {
 	for {
 		if setup_listener_conn == nil{
-			setup_listener_conn, _ = setup_listener.AcceptTCP()
+			setup_listener_conn, _ = setup_listener.Accept()
+			fmt.Println("Accepted TCP from", setup_listener_conn.RemoteAddr().String())
 		}
 
 		hello_buf, err := readFromTCPConn(setup_listener_conn)
@@ -254,15 +272,19 @@ func listenSetup() {
 		}
 		hello, err := protocol.DecodeSecure(*hello_buf)
 		if err != nil ||
-			hello.MessageType != protocol.HELLO ||
-				hello.PublicKey == nil {
+			hello.MessageType != protocol.HELLO {
 			fmt.Println("Bad HELLO from", setup_listener_conn.RemoteAddr().String())
 			setup_listener_conn = nil
 			continue
 		}
 
+		fmt.Println("Received HELLO from", setup_listener_conn.RemoteAddr().String())
+
 		first_half_key, enc_half_key := generateHalfKey(hello.PublicKey)
+		fmt.Println("Generated half key")
 		sendHelloX(setup_listener_conn, enc_half_key)
+
+		fmt.Println("Sent HELLOX to", setup_listener_conn.RemoteAddr().String())
 
 		final_buf, err := readFromTCPConn(setup_listener_conn)
 		if err != nil {
@@ -278,16 +300,25 @@ func listenSetup() {
 			setup_listener_conn = nil
 			continue
 		}
+
+		fmt.Println("Received FINALX from", setup_listener_conn.RemoteAddr().String())
+
 		second_half_key, _ := rsa.DecryptOAEP(sha256.New(), crypto_rand.Reader, rsa_kp, final.Data, HALF_KEY_LABEL)
 
 		key := bytes.Join([][]byte{first_half_key, second_half_key}, nil)
 
 		sendFinal(setup_listener_conn)
 
-		addPeer(setup_listener_conn.RemoteAddr().String())
+		fmt.Println("Sent FINAL to", setup_listener_conn.RemoteAddr().String())
+
+		parts := strings.Split(setup_listener_conn.RemoteAddr().String(), ":")
+		port,_ := strconv.Atoi(parts[1])
+		sa := fmt.Sprintf("%s:%d", parts[0], port - 2)
+
+		addPeer(sa)
 		block_cipher, err := aes.NewCipher(key)
 		ciphers_lock.Lock()
-		ciphers[setup_listener_conn.RemoteAddr().String()] = &block_cipher
+		ciphers[sa] = block_cipher
 		ciphers_lock.Unlock()
 	}
 }
@@ -965,7 +996,53 @@ func periodicEvents() {
 }
 
 func processMessage(peer_addr *net.UDPAddr, buf *[]byte) {
-	message, err := protocol.DecodeGossip(*buf)
+	if !peerIsSetUp(peer_addr) {
+		fmt.Println("Peer is not set up:", peer_addr.String())
+		go handshake(&net.TCPAddr{IP:peer_addr.IP, Port:peer_addr.Port, Zone:peer_addr.Zone})
+		return
+	}
+
+	message, err := protocol.DecodeSecure(*buf)
+	if err != nil {
+		fmt.Println("Error decoding", err)
+		fmt.Println(len(*buf))
+		return
+	}
+
+	if message.MessageType != protocol.DATA {
+		fmt.Println("Non DATA UDP message")
+		return
+	}
+
+	ciphers_lock.Lock()
+	block_cipher := ciphers[peer_addr.String()]
+	if block_cipher == nil {
+		fmt.Println("Nil block cipher for peer", peer_addr.String())
+		return
+	}
+	ciphers_lock.Unlock()
+
+	//fmt.Println("Received", hex.Dump(message.Data))
+
+	// Split data into blocks, encrypt, and concatenate
+	unencrypted_data := make([]byte, 0)
+	for i := 0; i*aes.BlockSize < len(message.Data); i++ {
+		var upper int
+		if (i+1)*aes.BlockSize > len(message.Data) {
+			upper = len(message.Data)
+		} else {
+			upper = (i+1)*aes.BlockSize
+		}
+
+		encrypted := message.Data[i*aes.BlockSize:upper]
+
+		unencrypted := make([]byte, aes.BlockSize)
+		block_cipher.Decrypt(unencrypted, encrypted)
+
+		unencrypted_data = bytes.Join([][]byte{unencrypted_data, unencrypted}, nil)
+	}
+
+	gossip_message, err := protocol.DecodeGossip(unencrypted_data[:message.DataLength])
 	if err != nil {
 		fmt.Println("Error decoding", err)
 		fmt.Println(len(*buf))
@@ -973,28 +1050,28 @@ func processMessage(peer_addr *net.UDPAddr, buf *[]byte) {
 	}
 
 	num_msg_types := 0
-	if message.Rumor!=nil {num_msg_types++}
-	if message.Status!=nil {num_msg_types++}
-	if message.Private!=nil {num_msg_types++}
-	if message.DataRequest!=nil {num_msg_types++}
-	if message.DataReply!=nil {num_msg_types++}
-	if message.SearchRequest!=nil {num_msg_types++}
-	if message.SearchReply!=nil {num_msg_types++}
+	if gossip_message.Rumor!=nil {num_msg_types++}
+	if gossip_message.Status!=nil {num_msg_types++}
+	if gossip_message.Private!=nil {num_msg_types++}
+	if gossip_message.DataRequest!=nil {num_msg_types++}
+	if gossip_message.DataReply!=nil {num_msg_types++}
+	if gossip_message.SearchRequest!=nil {num_msg_types++}
+	if gossip_message.SearchReply!=nil {num_msg_types++}
 	if num_msg_types != 1{
 		fmt.Println("Malformed Message: more than one component")
 		return
 	}
 
-	printoutMessageReceived(peer_addr, message, false)
+	printoutMessageReceived(peer_addr, gossip_message, false)
 
-	if message.Rumor != nil {
-		processRumor(peer_addr, message)
-	} else if message.Status != nil {
-		processStatus(peer_addr, message)
-	} else if message.SearchRequest != nil {
-		processSearchRequest(peer_addr, message)
+	if gossip_message.Rumor != nil {
+		processRumor(peer_addr, gossip_message)
+	} else if gossip_message.Status != nil {
+		processStatus(peer_addr, gossip_message)
+	} else if gossip_message.SearchRequest != nil {
+		processSearchRequest(peer_addr, gossip_message)
 	} else {
-		processP2P(message)
+		processP2P(gossip_message)
 	}
 }
 
@@ -1070,8 +1147,14 @@ func processRumor(peer_addr *net.UDPAddr,message *protocol.GossipPacket) {
 			new_peer_addr, _ := net.ResolveUDPAddr("udp4", peer_addr_str)
 			printoutMongeringRoute(new_peer_addr)
 			// Send the message
-			message_bytes, _ := protocol.EncodeGossip(message)
-			gossip_conn.WriteToUDP(message_bytes, new_peer_addr)
+			message_bytes, err := protocol.EncodeGossip(message)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			if peerIsSetUp(new_peer_addr) {
+				sendData(new_peer_addr, message_bytes)
+			}
 		}
 	} else {
 		new_peer_addr_str := peers[int(rand.Float32()*float32(len(peers)))]
@@ -1108,8 +1191,14 @@ func processStatus(peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
 			if no_forward {continue}
 
 			message_to_send := messages[peer_status.NextID]
-			message_bytes, _ := protocol.EncodeGossip(message_to_send)
-			gossip_conn.WriteToUDP(message_bytes, peer_addr)
+			message_bytes, err := protocol.EncodeGossip(message_to_send)
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+			if peerIsSetUp(peer_addr) {
+				sendData(peer_addr, message_bytes)
+			}
 			return
 		} else if uint32(len(messages)) < peer_status.NextID {
 			go sendStatus(peer_addr)
@@ -1305,6 +1394,9 @@ func processSearchReply(message *protocol.GossipPacket) {
 }
 
 func sendSearchRequest(addr *net.UDPAddr, origin string, budget uint64, keywords []string) {
+	if !peerIsSetUp(addr) {
+		return
+	}
 	message := &protocol.GossipPacket{
 		SearchRequest: &protocol.SearchRequest{
 			Origin:   origin,
@@ -1313,8 +1405,12 @@ func sendSearchRequest(addr *net.UDPAddr, origin string, budget uint64, keywords
 		},
 	}
 
-	message_bytes, _ := protocol.EncodeGossip(message)
-	gossip_conn.WriteToUDP(message_bytes, addr)
+	message_bytes, err := protocol.EncodeGossip(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sendData(addr, message_bytes)
 }
 
 func sendSearchReply(dest string, results []*protocol.SearchResult) {
@@ -1331,6 +1427,8 @@ func sendSearchReply(dest string, results []*protocol.SearchResult) {
 }
 
 func sendStatus(addr *net.UDPAddr) {
+	if !peerIsSetUp(addr){return}
+
 	status_vector_lock.Lock()
 	defer status_vector_lock.Unlock()
 
@@ -1346,11 +1444,17 @@ func sendStatus(addr *net.UDPAddr) {
 		},
 	}
 
-	message_bytes, _ := protocol.EncodeGossip(message)
-	gossip_conn.WriteToUDP(message_bytes, addr)
+	message_bytes, err := protocol.EncodeGossip(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sendData(addr, message_bytes)
 }
 
 func sendRouteRumor(addr *net.UDPAddr) {
+	if !peerIsSetUp(addr) { return }
+
 	status_vector_lock.Lock()
 	defer status_vector_lock.Unlock()
 
@@ -1374,8 +1478,12 @@ func sendRouteRumor(addr *net.UDPAddr) {
 	}
 	status_vector[message.Rumor.Origin] = append(status_vector[message.Rumor.Origin], message)
 
-	message_bytes, _ := protocol.EncodeGossip(message)
-	gossip_conn.WriteToUDP(message_bytes, addr)
+	message_bytes, err := protocol.EncodeGossip(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sendData(addr, message_bytes)
 }
 
 func sendPrivate(dest string, text string) {
@@ -1444,17 +1552,29 @@ func sendP2P(message *protocol.GossipPacket, dest string) {
 
 	// Resolve the next hop address and send the message
 	next_addr, _ := net.ResolveUDPAddr("udp4", next.Next)
-	message_bytes,_ := protocol.EncodeGossip(message)
+	message_bytes,err := protocol.EncodeGossip(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 
-	gossip_conn.WriteToUDP(message_bytes, next_addr)
+	if !peerIsSetUp(next_addr) { return }
+
+	sendData(next_addr, message_bytes)
 }
 
 func startGossiping(peer_addr *net.UDPAddr, message *protocol.GossipPacket) {
+	if !peerIsSetUp(peer_addr) { return }
+
 	printoutMongeringText(peer_addr)
 
 	// Send the message
-	message_bytes, _ := protocol.EncodeGossip(message)
-	gossip_conn.WriteToUDP(message_bytes, peer_addr)
+	message_bytes, err := protocol.EncodeGossip(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	sendData(peer_addr, message_bytes)
 
 	// Flip a coin and check if there are new peers to gossip with
 	if rand.Float32() >= 0.5 && len(peers) > 1{
@@ -1488,7 +1608,7 @@ func readFromUDPConn(conn *net.UDPConn) (*net.UDPAddr, *[]byte, error) {
 	return addr, &buf, nil
 }
 
-func readFromTCPConn(conn *net.TCPConn) (*[]byte, error){
+func readFromTCPConn(conn net.Conn) (*[]byte, error){
 	buf := make([]byte, 10000)
 	num_bytes, err := conn.Read(buf[0:])
 
@@ -1508,21 +1628,30 @@ func readFromTCPConn(conn *net.TCPConn) (*[]byte, error){
  */
 func handshake(addr *net.TCPAddr) ([]byte, error) {
 	if setup_sender_conn != nil {
-		return nil, net.Error("Sender conn is already in use")
+		return nil, errors.New("Sender conn is already in use")
 	}
 
 	sa := fmt.Sprintf("%s:%d", addr.IP, addr.Port + 1)
-	remote_addr,_ := net.ResolveTCPAddr("tcp", sa)
-
-	setup_sender_conn, err := net.DialTCP("tcp", setup_sender_addr, remote_addr)
+	remote_addr,err := net.ResolveTCPAddr("tcp", sa)
 	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	setup_sender_conn, err := reuseport.Dial("tcp", setup_sender_addr.String(), remote_addr.String())
+	if err != nil {
+		setup_sender_conn = nil
 		return nil, err
 	}
 
 	sendHello(setup_sender_conn)
 
+	fmt.Println("Sent HELLO to", addr.String())
+
 	hello_buf, err := readFromTCPConn(setup_sender_conn)
 	if err != nil{
+		fmt.Println(err)
+		setup_sender_conn.Close()
 		setup_sender_conn = nil
 		return nil, err
 	}
@@ -1530,28 +1659,39 @@ func handshake(addr *net.TCPAddr) ([]byte, error) {
 	hello, err := protocol.DecodeSecure(*hello_buf)
 	if err != nil ||
 		hello.MessageType != protocol.HELLOX ||
-		hello.PublicKey == nil ||
 		hello.Data == nil {
+		setup_sender_conn.Close()
 		setup_sender_conn = nil
-		return nil, net.Error("Bad HELLOX")
+		fmt.Println("Bad HELLOX from", addr.String())
+		return nil, errors.New("Bad HELLOX")
 	}
+
+	fmt.Println("Received HELLOX from", addr.String())
 
 	first_half_key, err := rsa.DecryptOAEP(sha256.New(), crypto_rand.Reader, rsa_kp, hello.Data, HALF_KEY_LABEL)
 	second_half_key, enc_second_half_key := generateHalfKey(hello.PublicKey)
 
+	fmt.Println("Generated half key")
+
 	sendFinalX(setup_sender_conn, enc_second_half_key)
+
+	fmt.Println("Sent FINALX to", addr.String())
 
 	final_buf, err := readFromTCPConn(setup_sender_conn)
 	if err != nil{
+		setup_sender_conn.Close()
 		setup_sender_conn = nil
 		return nil, err
 	}
 
 	final, err := protocol.DecodeSecure(*final_buf)
-	if err != nil || final.MessageType != protocol.HELLOX{
+	if err != nil || final.MessageType != protocol.FINAL {
+		setup_sender_conn.Close()
 		setup_sender_conn = nil
-		return nil, net.Error("Bad FINAL")
+		return nil, errors.New("Bad FINAL")
 	}
+
+	fmt.Println("Received FINAL from", addr.String())
 
 	key := bytes.Join([][]byte{first_half_key, second_half_key}, nil)
 
@@ -1566,61 +1706,131 @@ func handshake(addr *net.TCPAddr) ([]byte, error) {
 Generates a half-key of 16 bytes. Returns the plain half-key
 and the half-key encrypted with the provided public key.
  */
-func generateHalfKey(public_key *rsa.PublicKey) ([]byte, []byte) {
+func generateHalfKey(public_key rsa.PublicKey) ([]byte, []byte) {
 	hk := make([]byte, HALF_KEY_BYTE_LENGTH)
 	crypto_rand.Read(hk)
-	enc, _ := rsa.EncryptOAEP(sha256.New(), crypto_rand.Reader, public_key, hk, HALF_KEY_LABEL)
+	enc, err := rsa.EncryptOAEP(sha256.New(), crypto_rand.Reader, &public_key, hk, HALF_KEY_LABEL)
+	if err != nil {
+		fmt.Println(err)
+		return nil, nil
+	}
 	return hk, enc
 }
 
-func sendHello(conn *net.TCPConn) {
+func sendHello(conn net.Conn) {
 	message := &protocol.SecurePacket{
 		MessageType: protocol.HELLO,
-		PublicKey: &rsa_kp.PublicKey,
+		PublicKey: rsa_kp.PublicKey,
+		Data: make([]byte, 0),
 	}
-	message_bytes,_ := protocol.EncodeSecure(message)
+	message_bytes,err := protocol.EncodeSecure(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	//fmt.Println(len(message_bytes), hex.Dump(message_bytes))
 	conn.Write(message_bytes)
 }
 
-func sendHelloX(conn *net.TCPConn, enc_half_key []byte) {
+func sendHelloX(conn net.Conn, enc_half_key []byte) {
 	message := &protocol.SecurePacket{
 		MessageType: protocol.HELLOX,
-		PublicKey: &rsa_kp.PublicKey,
+		PublicKey: rsa_kp.PublicKey,
 		Data: enc_half_key,
 	}
-	message_bytes,_ := protocol.EncodeSecure(message)
+	message_bytes,err := protocol.EncodeSecure(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	conn.Write(message_bytes)
 }
 
-func sendFinalX(conn *net.TCPConn, enc_half_key []byte) {
+func sendFinalX(conn net.Conn, enc_half_key []byte) {
 	message := &protocol.SecurePacket{
 		MessageType: protocol.FINALX,
 		Data: enc_half_key,
 	}
-	message_bytes,_ := protocol.EncodeSecure(message)
+	message_bytes,err := protocol.EncodeSecure(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	conn.Write(message_bytes)
 }
 
-func sendFinal(conn *net.TCPConn) {
+func sendFinal(conn net.Conn) {
+
 	message := &protocol.SecurePacket{
 		MessageType: protocol.FINAL,
+		Data: make([]byte, 0),
+		PublicKey: rsa_kp.PublicKey,
 	}
-	message_bytes,_ := protocol.EncodeSecure(message)
+	message_bytes,err := protocol.EncodeSecure(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	conn.Write(message_bytes)
 }
 
-func sendData(conn *net.TCPConn, encrypted_data []byte) {
+func peerIsSetUp(addr net.Addr) bool {
+	ciphers_lock.Lock()
+	_,ok := ciphers[addr.String()]
+	ciphers_lock.Unlock()
+	return ok
+}
+
+// Credit to github user stupidbodo
+func Pad(src []byte) []byte {
+	padding := aes.BlockSize - len(src)%aes.BlockSize
+	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
+	return append(src, padtext...)
+}
+
+func sendData(addr *net.UDPAddr, unencrypted_data []byte) {
+	ciphers_lock.Lock()
+	block_cipher := ciphers[addr.String()]
+	ciphers_lock.Unlock()
+
+	data_length := uint32(len(unencrypted_data))
+
+	// Split data into blocks, encrypt, and concatenate
+	encrypted_data := make([]byte, 0)
+	for i := 0; i*aes.BlockSize < int(data_length); i++ {
+		// Pad to fill a block
+		var unencrypted []byte
+		if (i+1) * aes.BlockSize > int(data_length) {
+			unencrypted = Pad(unencrypted_data[i*aes.BlockSize:])
+		} else {
+			unencrypted = unencrypted_data[i*aes.BlockSize:(i+1)*aes.BlockSize]
+		}
+
+		encrypted := make([]byte, aes.BlockSize)
+		block_cipher.Encrypt(encrypted, unencrypted)
+
+		encrypted_data = bytes.Join([][]byte{encrypted_data, encrypted}, nil)
+	}
+
+	//fmt.Println("Sending", hex.Dump(encrypted_data))
+
 	message := &protocol.SecurePacket{
+		DataLength: data_length,
 		MessageType: protocol.DATA,
 		Data: encrypted_data,
 	}
-	message_bytes, _ := protocol.EncodeSecure(message)
-	conn.Write(message_bytes)
+	message_bytes, err := protocol.EncodeSecure(message)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	gossip_conn.WriteToUDP(message_bytes, addr)
 }
 
 // Assumes the message is well-formed
 func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPacket, client bool) {
-	//if true {return}
+	if true {return}
 
 	if client {
 		fmt.Println("CLIENT", message.Rumor.PeerMessage.Text, message.Rumor.Origin)
@@ -1642,32 +1852,32 @@ func printoutMessageReceived(peer_addr *net.UDPAddr, message *protocol.GossipPac
 }
 
 func printoutDSDV(origin string, addr string) {
-	//if true {return}
+	if true {return}
 	fmt.Printf("DSDV %s: %s\n", origin, addr)
 }
 
 func printoutDirectRoute(origin string, addr string) {
-	//if true {return}
+	if true {return}
 	fmt.Printf("DIRECT-ROUTE FOR %s: %s\n", origin, addr)
 }
 
 func printoutMongeringRoute(peer_addr *net.UDPAddr) {
-	//if true {return}
+	if true {return}
 	fmt.Println("MONGERING ROUTE to", peer_addr.String())
 }
 
 func printoutMongeringText(peer_addr *net.UDPAddr) {
-	//if true {return}
+	if true {return}
 	fmt.Println("MONGERING TEXT to", peer_addr.String())
 }
 
 func printoutFlipPassed(peer_addr *net.UDPAddr) {
-	//if true {return}
+	if true {return}
 	fmt.Println("FLIPPED COIN sending rumor to", peer_addr.String())
 }
 
 func printoutInSync(peer_addr *net.UDPAddr) {
-	//if true {return}
+	if true {return}
 	fmt.Println("IN SYNC WITH", peer_addr.String())
 }
 
